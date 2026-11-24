@@ -1,6 +1,7 @@
 {
   "name": "abifr-frontend",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "scripts": {
     "dev": "node ./node_modules/next/dist/bin/next dev -H 127.0.0.1 -p 14300",

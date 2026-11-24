@@ -46,7 +46,8 @@ node .\node_modules\next\dist\bin\next build
 .\doc-intel\.venv\Scripts\python.exe scripts\verify_e2e.py
 ```
 
-## Documentation
+## Documentation & License
 - [Architecture & Technical Decisions](docs/ARCHITECTURE.md)
 - [Tailwind CSS UI Audit](docs/TAILWIND_UI_AUDIT.md)
 - [Port Allocation](docs/PORTS.md)
+- **License**: Licensed under the [Apache License 2.0](LICENSE) (`Apache-2.0`).

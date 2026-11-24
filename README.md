@@ -101,7 +101,8 @@ Hasil terakhir yang dieksekusi: Rust 10/10, Python 5/5, Vitest 2/2, `tsc` & `nex
 
 ---
 
-## 📄 Dokumentasi
+## 📄 Dokumentasi & Lisensi
 - [Arsitektur](docs/ARCHITECTURE.md)
 - [Audit UI Tailwind](docs/TAILWIND_UI_AUDIT.md)
 - [Alokasi Port](docs/PORTS.md)
+- **Lisensi**: Dilindungi di bawah lisensi [Apache License 2.0](LICENSE) (`Apache-2.0`).
