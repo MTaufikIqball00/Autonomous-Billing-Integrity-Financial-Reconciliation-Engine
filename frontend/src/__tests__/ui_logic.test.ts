@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it, expect } from "vitest";
 import {
+  api,
   formatMoney,
   API_BASE,
   buildPaginationQuery,
@@ -43,5 +44,23 @@ describe("ABIFR Frontend Financial Formatting, Pagination & Cookie Security", ()
     expect(apiSource).not.toMatch(/localStorage\.(setItem|getItem)/);
     expect(apiSource).toContain('credentials: "include"');
     expect(apiSource).toContain("X-CSRF-Token");
+  });
+
+  it("serves synthetic segregated-currency data in Interactive Demo Mode without hitting network", async () => {
+    api.setDemoMode(true);
+    try {
+      const ov = await api.request("/dashboard/overview");
+      expect(ov.currency_breakdown.map((b: any) => b.currency)).toEqual(["USD", "EUR"]);
+      const fnds = await api.request("/findings?category=CONTRACT_PRICE_MISMATCH");
+      expect(fnds.findings.length).toBe(1);
+      expect(fnds.findings[0].vendor_name).toContain("[DEMO]");
+      const rev = await api.request("/findings/fnd-demo-1/review", {
+        method: "POST",
+        body: JSON.stringify({ action: "approve", notes: "Demo review" }),
+      });
+      expect(rev.reviewer_status).toBe("approved");
+    } finally {
+      api.setDemoMode(false);
+    }
   });
 });

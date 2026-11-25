@@ -80,6 +80,11 @@ Buka **http://127.0.0.1:14300**.
 
 > Linux/macOS: salin `.env.example` ke `.env`, lalu jalankan `bash scripts/launch.sh`.
 
+### 🌐 Deploy Demo Portofolio ke Vercel (Frontend Saja)
+1. Buka [vercel.com/new](https://vercel.com/new) dan import repository GitHub ini.
+2. Atur **Root Directory** menjadi `frontend`, lalu klik **Deploy**.
+3. Pada halaman login, klik tombol **Launch Interactive Demo (Synthetic Data)** untuk mencoba seluruh 14 modul UI, *Evidence Viewer*, *Reconciliation Workbench*, filter *Audit Findings*, simulasi review, ganti role RBAC (`admin`/`reviewer`/`analyst`/`auditor`), serta ekspor CSV secara langsung di browser tanpa memerlukan backend aktif. Seluruh data demo diberi label jelas `[DEMO MODE — SYNTHETIC DATA]`.
+
 ---
 
 ## 🧪 Pengujian
@@ -88,7 +93,7 @@ Buka **http://127.0.0.1:14300**.
 cd backend; cargo clippy --all-targets -- -D warnings
 cd backend; cargo test --test comprehensive_tests                  # 13 tes unit & keamanan Rust
 .\doc-intel\.venv\Scripts\python.exe -m pytest doc-intel\tests -v  # 9 tes Python doc-intel
-cd frontend; npm run typecheck; npm test; npm run build            # tsc, 5 tes Vitest, build Next.js 15.5.29
+cd frontend; npm run typecheck; npm test; npm run build            # tsc, 6 tes Vitest, build Next.js 15.5.29
 .\doc-intel\.venv\Scripts\python.exe scripts\verify_e2e.py           # 14 cek E2E live (saat stack aktif)
 ```
 
@@ -99,7 +104,7 @@ Hasil verifikasi terakhir pada mesin lokal:
 - `comprehensive_tests`: **13/13 lulus**
 - `http_integration_tests`: **1/1 lulus** (cookie `HttpOnly`, CSRF, revokasi `/auth/logout`, rate limit `429`, user nonaktif, RBAC 4 role, materialisasi, rekonsiliasi, review, & ekspor CSV/XLSX/PDF)
 - `pytest doc-intel\tests -v`: **9/9 lulus**
-- `frontend` (`tsc`, Vitest, `next build`): **5/5 lulus**, build Next.js `15.5.29` sukses
+- `frontend` (`tsc`, Vitest, `next build`): **6/6 lulus**, build Next.js `15.5.29` sukses
 - `scripts\verify_e2e.py`: **14/14 cek live E2E lulus**
 
 ---

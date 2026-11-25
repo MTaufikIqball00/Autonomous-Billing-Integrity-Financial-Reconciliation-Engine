@@ -1,3 +1,5 @@
+import { handleDemoRequest } from "./demoData";
+
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:14800/api/v1";
 
@@ -34,6 +36,15 @@ export function isPotentialAnomaly(f: { classification_type?: string }): boolean
 class ApiClient {
   // Never stores JWT in sessionStorage or localStorage; relies strictly on HttpOnly cookies
   private csrf: string | null = null;
+  private demoMode = false;
+
+  setDemoMode(enabled: boolean) {
+    this.demoMode = enabled;
+  }
+
+  isDemoMode(): boolean {
+    return this.demoMode;
+  }
 
   setCsrf(csrf?: string | null) {
     this.csrf = csrf ?? null;
@@ -50,6 +61,9 @@ class ApiClient {
   }
 
   async request<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+    if (this.demoMode) {
+      return handleDemoRequest<T>(path, init);
+    }
     const isJson = init.body && !(init.body instanceof FormData);
     const res = await fetch(`${API_BASE}${path}`, {
       ...init,
@@ -78,6 +92,13 @@ class ApiClient {
     onProgress?: (pct: number) => void,
     vendorId?: string
   ): Promise<any> {
+    if (this.demoMode) {
+      return Promise.reject(
+        new Error(
+          "[Demo Mode] File OCR & immutable storage require the local Rust + RapidOCR backend."
+        )
+      );
+    }
     return new Promise((resolve, reject) => {
       const form = new FormData();
       form.append("file", file);
@@ -111,6 +132,31 @@ class ApiClient {
   }
 
   async downloadReport(reportId: string, format: "csv" | "xlsx" | "pdf") {
+    if (this.demoMode) {
+      const content =
+        format === "csv"
+          ? [
+              "finding_id,category,classification_type,severity,vendor,invoice_number,variance_amount,currency,rule_applied",
+              "fnd-demo-1,CONTRACT_PRICE_MISMATCH,confirmed_rule_violation,high,[DEMO] Nusantara Cloud Infrastructure Ltd.,DEMO-INV-2026-081,500.00,USD,CONTRACT_UNIT_PRICE_CHECK",
+              "fnd-demo-2,UNAUTHORIZED_CHARGE,confirmed_rule_violation,medium,[DEMO] Nusantara Cloud Infrastructure Ltd.,DEMO-INV-2026-081,55.00,USD,ALLOWED_ADDITIONAL_CHARGES_CHECK",
+              "fnd-demo-3,EXTRACTION_UNCERTAIN,potential_anomaly,high,[DEMO] EuroData Security GmbH,,,EUR,PROMPT_INJECTION_QUARANTINE_GUARD",
+            ].join("\n")
+          : `[DEMO MODE - SYNTHETIC REPORT SNAPSHOT]\nReport ID: ${reportId}\nFormat requested: ${format.toUpperCase()}\nNotice: Binary XLSX/PDF generation is performed by the Rust backend (rust_xlsxwriter / PDF 1.4 generator).`;
+      const ext = format === "csv" ? "csv" : "txt";
+      const blob = new Blob([content], {
+        type: format === "csv" ? "text/csv;charset=utf-8" : "text/plain;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `abifr-demo-report-${reportId}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
     const res = await fetch(`${API_BASE}/reports/${reportId}/export?format=${format}`, {
       credentials: "include",
       headers: this.headers(),

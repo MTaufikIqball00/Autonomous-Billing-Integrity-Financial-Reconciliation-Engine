@@ -22,8 +22,10 @@ import {
   RefreshCw,
   ShieldCheck,
   KeyRound,
+  Sparkles,
 } from "lucide-react";
 import { api, buildPaginationQuery, PaginationMeta, UserSession } from "@/lib/api";
+import { DEMO_USER } from "@/lib/demoData";
 import { DashboardModules, FindingsFilters } from "@/components/DashboardModules";
 import { DocumentViewerModal } from "@/components/DocumentViewerModal";
 import { ReconciliationWorkbench } from "@/components/ReconciliationWorkbench";
@@ -49,6 +51,7 @@ const NAV_ITEMS = [
 
 export default function HomePage() {
   const [user, setUser] = useState<UserSession | null>(null);
+  const [isDemo, setIsDemo] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [email, setEmail] = useState("admin@abifr.local");
   const [password, setPassword] = useState("");
@@ -72,7 +75,7 @@ export default function HomePage() {
     classification_type: "",
   });
 
-  // Live DB state
+  // Live DB / Demo state
   const [overview, setOverview] = useState<any>(null);
   const [documents, setDocuments] = useState<any[]>([]);
   const [vendors, setVendors] = useState<any[]>([]);
@@ -275,6 +278,8 @@ export default function HomePage() {
     setLoggingIn(true);
     setLoginError(null);
     try {
+      api.setDemoMode(false);
+      setIsDemo(false);
       const res = await api.request("/auth/login", {
         method: "POST",
         body: JSON.stringify({ email, password }),
@@ -290,10 +295,23 @@ export default function HomePage() {
     }
   };
 
+  const handleEnterDemo = () => {
+    setLoginError(null);
+    setBanner(null);
+    api.setDemoMode(true);
+    api.setCsrf(DEMO_USER.csrf_token);
+    setIsDemo(true);
+    setActiveTab("overview");
+    setUser({ ...DEMO_USER });
+  };
+
   const handleLogout = async () => {
     await api.request("/auth/logout", { method: "POST" }).catch(() => {});
+    api.setDemoMode(false);
     api.setCsrf(null);
+    setIsDemo(false);
     setUser(null);
+    setBanner(null);
   };
 
   const handlePageChange = (tabKey: string, nextOffset: number) => {
@@ -375,7 +393,21 @@ export default function HomePage() {
             </button>
           </form>
 
-          <div className="mt-5 rounded-lg border border-slate-800 bg-slate-950 p-3 text-[11px] text-slate-400">
+          <div className="mt-4 border-t border-slate-800 pt-4">
+            <button
+              type="button"
+              onClick={handleEnterDemo}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 py-2.5 text-xs font-semibold text-amber-200 hover:bg-amber-500/20"
+            >
+              <Sparkles className="h-4 w-4 text-amber-300" />
+              Launch Interactive Demo (Synthetic Data)
+            </button>
+            <p className="mt-1.5 text-center text-[11px] text-slate-500">
+              Preview all 14 enterprise modules directly in your browser without a live backend.
+            </p>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-3 text-[11px] text-slate-400">
             <p className="font-semibold text-slate-300">RBAC Local Roles Provisioned:</p>
             <p className="mt-1 font-mono">admin@abifr.local • reviewer@abifr.local</p>
             <p className="font-mono">analyst@abifr.local • auditor@abifr.local</p>
@@ -432,7 +464,7 @@ export default function HomePage() {
             onClick={handleLogout}
             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-700 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
           >
-            <LogOut className="h-3.5 w-3.5" /> Sign Out
+            <LogOut className="h-3.5 w-3.5" /> {isDemo ? "Exit Demo" : "Sign Out"}
           </button>
         </div>
       </aside>
@@ -480,16 +512,25 @@ export default function HomePage() {
               <Menu className="h-4 w-4" />
             </button>
             <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-emerald-300">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Rust API :{health?.backend_port ?? 14800}
-              </span>
-              <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-0.5 text-slate-300">
-                PG: {health?.postgresql ?? "..."}
-              </span>
-              <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-0.5 text-slate-300">
-                Doc-Intel: {health?.doc_intel?.status ?? "..."}
-              </span>
+              {isDemo ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-amber-200">
+                  <Sparkles className="h-3 w-3 text-amber-300" />
+                  DEMO MODE • Synthetic Data
+                </span>
+              ) : (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-emerald-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                    Rust API :{health?.backend_port ?? 14800}
+                  </span>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-0.5 text-slate-300">
+                    PG: {health?.postgresql ?? "..."}
+                  </span>
+                  <span className="rounded-full border border-slate-700 bg-slate-900 px-2.5 py-0.5 text-slate-300">
+                    Doc-Intel: {health?.doc_intel?.status ?? "..."}
+                  </span>
+                </>
+              )}
             </div>
           </div>
           <button
@@ -503,7 +544,40 @@ export default function HomePage() {
         </header>
 
         <main className="flex-1 p-4 lg:p-6">
-          {user.must_rotate_password && !rotateBannerDismissed && (
+          {isDemo && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-100">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-amber-300 shrink-0" />
+                <span>
+                  <strong>[DEMO MODE — SYNTHETIC DATA]</strong> Interactive portfolio preview running in-browser without a connected Rust/PostgreSQL backend.
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-amber-200/80" htmlFor="demo-role">
+                  Preview Role:
+                </label>
+                <select
+                  id="demo-role"
+                  value={user.role}
+                  onChange={(e) => setUser((u) => (u ? { ...u, role: e.target.value } : u))}
+                  className="rounded border border-amber-500/40 bg-slate-950 px-2 py-0.5 font-mono text-[11px] text-amber-200"
+                >
+                  <option value="admin">admin</option>
+                  <option value="reviewer">reviewer</option>
+                  <option value="analyst">analyst</option>
+                  <option value="auditor">auditor</option>
+                </select>
+                <button
+                  onClick={handleLogout}
+                  className="rounded border border-amber-400/50 bg-amber-500/20 px-2.5 py-0.5 font-medium text-amber-100 hover:bg-amber-500/30"
+                >
+                  Exit Demo
+                </button>
+              </div>
+            </div>
+          )}
+
+          {user.must_rotate_password && !rotateBannerDismissed && !isDemo && (
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-200">
               <div className="flex items-center gap-2">
                 <KeyRound className="h-4 w-4 text-amber-300 shrink-0" />
