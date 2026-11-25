@@ -98,21 +98,26 @@ def call_external_provider_if_enabled(
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         if not api_key or cfg.model_identifier == "unconfigured":
             raise RuntimeError("OpenAI provider selected but OPENAI_API_KEY or OPENAI_MODEL is not configured.")
-        resp = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": cfg.model_identifier,
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"UNTRUSTED_DOCUMENT_CONTENT:\n{payload_text}"},
-                ],
-            },
-            timeout=cfg.timeout_secs,
-        )
-        resp.raise_for_status()
+        try:
+            resp = httpx.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": cfg.model_identifier,
+                    "temperature": 0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"UNTRUSTED_DOCUMENT_CONTENT:\n{payload_text}"},
+                    ],
+                },
+                timeout=cfg.timeout_secs,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"OpenAI provider request failed with HTTP {exc.response.status_code}.") from None
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"OpenAI provider network error: {type(exc).__name__}.") from None
         content = resp.json()["choices"][0]["message"]["content"]
         return json.loads(content)
 
@@ -120,18 +125,23 @@ def call_external_provider_if_enabled(
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not api_key or cfg.model_identifier == "unconfigured":
             raise RuntimeError("Gemini provider selected but GEMINI_API_KEY or GEMINI_MODEL is not configured.")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.model_identifier}:generateContent?key={api_key}"
-        resp = httpx.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            json={
-                "system_instruction": {"parts": [{"text": EXTRACTION_SYSTEM_PROMPT}]},
-                "contents": [{"parts": [{"text": f"UNTRUSTED_DOCUMENT_CONTENT:\n{payload_text}"}]}],
-                "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
-            },
-            timeout=cfg.timeout_secs,
-        )
-        resp.raise_for_status()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.model_identifier}:generateContent"
+        try:
+            resp = httpx.post(
+                url,
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                json={
+                    "system_instruction": {"parts": [{"text": EXTRACTION_SYSTEM_PROMPT}]},
+                    "contents": [{"parts": [{"text": f"UNTRUSTED_DOCUMENT_CONTENT:\n{payload_text}"}]}],
+                    "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+                },
+                timeout=cfg.timeout_secs,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"Gemini provider request failed with HTTP {exc.response.status_code}.") from None
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"Gemini provider network error: {type(exc).__name__}.") from None
         candidates = resp.json().get("candidates", [])
         if not candidates:
             raise RuntimeError("Gemini provider returned empty candidates.")

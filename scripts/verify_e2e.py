@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
 
 import httpx
@@ -48,6 +49,7 @@ def main() -> None:
     be_port = env.get("BACKEND_PORT", "14800")
     admin_email = env.get("BOOTSTRAP_ADMIN_EMAIL", "admin@abifr.local")
     admin_pw = env["BOOTSTRAP_ADMIN_PASSWORD"]
+    auditor_pw = env.get("BOOTSTRAP_AUDITOR_PASSWORD") or admin_pw
 
     api_base = f"http://127.0.0.1:{be_port}/api/v1"
     fe_url = f"http://127.0.0.1:{fe_port}"
@@ -74,9 +76,9 @@ def main() -> None:
         # 4. RBAC Auditor Restrictions Verified
         aud_login = client.post(
             f"{api_base}/auth/login",
-            json={"email": "auditor@abifr.local", "password": admin_pw},
+            json={"email": "auditor@abifr.local", "password": auditor_pw},
         )
-        assert aud_login.status_code == 200
+        assert aud_login.status_code == 200, aud_login.text
         aud_hdr = {"Authorization": f"Bearer {aud_login.json()['token']}"}
         assert client.get(f"{api_base}/audit-logs", headers=aud_hdr).status_code == 200
         # Auditor must be blocked from uploading documents (403)
@@ -231,7 +233,66 @@ def main() -> None:
         assert pdf_r.status_code == 200 and pdf_r.content.startswith(b"%PDF-1.4")
         print(f"[PASS] 12. Audit report generated ({rid}) & verified exports: CSV ({len(csv_r.content)}B), XLSX ({len(xlsx_r.content)}B), PDF ({len(pdf_r.content)}B)")
 
-    print("\nALL 12 LIVE END-TO-END INTEGRATION CHECKS PASSED!")
+        # 13. Document-to-Entity Materialization Preview & Manual Confirm Bridge
+        vendors = client.get(f"{api_base}/vendors", headers=adm_hdr).json()["vendors"]
+        assert len(vendors) >= 1
+        vid = vendors[0]["id"]
+        mat_suffix = uuid.uuid4().hex[:6].upper()
+        mat_pdf = make_pdf([
+            "TAX INVOICE",
+            f"Invoice Number: SYNTH-MAT-E2E-{mat_suffix}",
+            "Invoice Date: 2026-08-22",
+            "Currency: USD",
+            "SKU-MAT | Managed Compute | 3 unit | $100.00 | $300.00",
+            "Subtotal: USD 300.00",
+            "Total Amount: USD 300.00",
+        ])
+        mat_up = client.post(
+            f"{api_base}/documents/upload",
+            headers=adm_hdr,
+            data={"vendor_id": vid},
+            files={"file": (f"synth_materialize_{mat_suffix}.pdf", mat_pdf, "application/pdf")},
+        )
+        assert mat_up.status_code == 201, mat_up.text
+        mat_doc_id = mat_up.json()["id"]
+        prev = client.get(f"{api_base}/documents/{mat_doc_id}/materialization-preview", headers=adm_hdr)
+        assert prev.status_code == 200, prev.text
+        prev_json = prev.json()
+        if not prev_json.get("already_materialized"):
+            mat_res = client.post(
+                f"{api_base}/documents/{mat_doc_id}/materialize",
+                headers=adm_hdr,
+                json={"vendor_id": vid, "auto_reconcile": True},
+            )
+            assert mat_res.status_code == 201, mat_res.text
+            assert mat_res.json()["entity_type"] == "invoice"
+        print("[PASS] 13. Document-to-Entity materialization preview & materialize workflow verified")
+
+        # 14. DB Session Revocation on Logout (Cookie + CSRF + Token Rejected After Logout)
+        sess_login = client.post(
+            f"{api_base}/auth/login",
+            json={"email": admin_email, "password": admin_pw},
+        )
+        assert sess_login.status_code == 200
+        sess_token = sess_login.json()["token"]
+        sess_csrf = sess_login.json()["csrf_token"]
+        sess_cookies = sess_login.cookies
+        assert client.get(f"{api_base}/auth/me", cookies=sess_cookies).status_code == 200
+        out_resp = client.post(
+            f"{api_base}/auth/logout",
+            cookies=sess_cookies,
+            headers={"X-CSRF-Token": sess_csrf},
+        )
+        assert out_resp.status_code == 200, out_resp.text
+        after_cookie = client.get(f"{api_base}/auth/me", cookies=sess_cookies)
+        after_bearer = client.get(
+            f"{api_base}/auth/me", headers={"Authorization": f"Bearer {sess_token}"}
+        )
+        assert after_cookie.status_code == 401
+        assert after_bearer.status_code == 401
+        print("[PASS] 14. DB session revocation on /auth/logout verified (401 post-logout)")
+
+    print("\nALL 14 LIVE END-TO-END INTEGRATION CHECKS PASSED!")
 
 
 if __name__ == "__main__":

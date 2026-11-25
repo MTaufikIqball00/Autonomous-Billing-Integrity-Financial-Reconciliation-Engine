@@ -102,7 +102,7 @@ pub fn normalize_money(raw: &str, default_currency: Option<&str>) -> Normalizati
         detected_currency = default_currency.map(|c| c.to_ascii_uppercase());
     }
 
-    let cleaned = working.replace(' ', "").replace('\u{00a0}', "");
+    let cleaned = working.replace([' ', '\u{00a0}'], "");
     if cleaned.is_empty() || !cleaned.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.') {
         return NormalizationOutcome::Invalid {
             original,

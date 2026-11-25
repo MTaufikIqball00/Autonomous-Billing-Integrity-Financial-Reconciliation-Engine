@@ -21,11 +21,14 @@ import {
   X,
   RefreshCw,
   ShieldCheck,
+  KeyRound,
 } from "lucide-react";
-import { api, UserSession } from "@/lib/api";
-import { DashboardModules } from "@/components/DashboardModules";
+import { api, buildPaginationQuery, PaginationMeta, UserSession } from "@/lib/api";
+import { DashboardModules, FindingsFilters } from "@/components/DashboardModules";
 import { DocumentViewerModal } from "@/components/DocumentViewerModal";
 import { ReconciliationWorkbench } from "@/components/ReconciliationWorkbench";
+
+const PAGE_SIZE = 25;
 
 const NAV_ITEMS = [
   { id: "overview", label: "Executive Overview", icon: LayoutDashboard },
@@ -51,12 +54,23 @@ export default function HomePage() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
+  const [rotateBannerDismissed, setRotateBannerDismissed] = useState(false);
 
   const [activeTab, setActiveTab] = useState("overview");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [loading, setLoading] = useState(false);
   const [banner, setBanner] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [health, setHealth] = useState<any>(null);
+
+  // Per-tab pagination offsets & metadata
+  const [offsets, setOffsets] = useState<Record<string, number>>({});
+  const [paginationMap, setPaginationMap] = useState<Record<string, PaginationMeta | undefined>>({});
+  const [findingsFilters, setFindingsFilters] = useState<FindingsFilters>({
+    category: "",
+    severity: "",
+    status: "",
+    classification_type: "",
+  });
 
   // Live DB state
   const [overview, setOverview] = useState<any>(null);
@@ -73,69 +87,178 @@ export default function HomePage() {
   const [models, setModels] = useState<any[]>([]);
   const [externalAiEnv, setExternalAiEnv] = useState(false);
   const [settings, setSettings] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
 
   // Active modals
   const [viewerDocId, setViewerDocId] = useState<string | null>(null);
   const [workbenchInvId, setWorkbenchInvId] = useState<string | null>(null);
 
-  const refreshAll = useCallback(async () => {
+  const setTabPagination = (key: string, pg?: PaginationMeta) => {
+    setPaginationMap((prev) => ({ ...prev, [key]: pg }));
+  };
+
+  const fetchTabData = useCallback(async () => {
+    if (!user) return;
     setLoading(true);
     try {
-      const [h, ov, docs, vends, ctrs, pos, invs, pays, fnds, rq, ag, rpts, mdls, stgs] =
-        await Promise.all([
-          api.request("/health").catch(() => null),
-          api.request("/dashboard/overview"),
-          api.request("/documents"),
-          api.request("/vendors"),
-          api.request("/contracts"),
-          api.request("/purchase-orders"),
-          api.request("/invoices"),
-          api.request("/payments"),
-          api.request("/findings"),
-          api.request("/review-queue"),
-          api.request("/agents/runs"),
-          api.request("/reports"),
-          api.request("/models"),
-          api.request("/settings"),
-        ]);
-      setHealth(h);
-      setOverview(ov);
-      setDocuments(docs.documents || []);
-      setVendors(vends.vendors || []);
-      setContracts(ctrs.contracts || []);
-      setPurchaseOrders(pos.purchase_orders || []);
-      setInvoices(invs.invoices || []);
-      setPayments(pays.payments || []);
-      setFindings(fnds.findings || []);
-      setReviewQueue(rq);
-      setAgentRuns(ag.agent_runs || []);
-      setReports(rpts.reports || []);
-      setModels(mdls.models || []);
-      setExternalAiEnv(Boolean(mdls.enable_external_ai_env));
-      setSettings(stgs.settings || []);
+      const [h, ov] = await Promise.all([
+        api.request("/health").catch(() => null),
+        api.request("/dashboard/overview").catch(() => null),
+      ]);
+      if (h) setHealth(h);
+      if (ov) setOverview(ov);
 
-      try {
-        const logs = await api.request("/audit-logs");
-        setAuditLogs(logs.audit_logs || []);
-      } catch {
-        setAuditLogs([]);
+      const offset = offsets[activeTab] ?? 0;
+
+      switch (activeTab) {
+        case "overview": {
+          const fnds = await api.request(`/findings?${buildPaginationQuery(10, 0)}`);
+          setFindings(fnds.findings || []);
+          break;
+        }
+        case "documents": {
+          const [docs, vends] = await Promise.all([
+            api.request(`/documents?${buildPaginationQuery(PAGE_SIZE, offset)}`),
+            api.request(`/vendors?${buildPaginationQuery(100, 0)}`),
+          ]);
+          setDocuments(docs.documents || []);
+          setTabPagination("documents", docs.pagination);
+          setVendors(vends.vendors || []);
+          break;
+        }
+        case "vendors": {
+          const vends = await api.request(`/vendors?${buildPaginationQuery(PAGE_SIZE, offset)}`);
+          setVendors(vends.vendors || []);
+          setTabPagination("vendors", vends.pagination);
+          break;
+        }
+        case "contracts": {
+          const [ctrs, vends] = await Promise.all([
+            api.request(`/contracts?${buildPaginationQuery(PAGE_SIZE, offset)}`),
+            api.request(`/vendors?${buildPaginationQuery(100, 0)}`),
+          ]);
+          setContracts(ctrs.contracts || []);
+          setTabPagination("contracts", ctrs.pagination);
+          setVendors(vends.vendors || []);
+          break;
+        }
+        case "purchase_orders": {
+          const [pos, vends, ctrs] = await Promise.all([
+            api.request(`/purchase-orders?${buildPaginationQuery(PAGE_SIZE, offset)}`),
+            api.request(`/vendors?${buildPaginationQuery(100, 0)}`),
+            api.request(`/contracts?${buildPaginationQuery(100, 0)}`),
+          ]);
+          setPurchaseOrders(pos.purchase_orders || []);
+          setTabPagination("purchase_orders", pos.pagination);
+          setVendors(vends.vendors || []);
+          setContracts(ctrs.contracts || []);
+          break;
+        }
+        case "invoices": {
+          const [invs, vends] = await Promise.all([
+            api.request(`/invoices?${buildPaginationQuery(PAGE_SIZE, offset)}`),
+            api.request(`/vendors?${buildPaginationQuery(100, 0)}`),
+          ]);
+          setInvoices(invs.invoices || []);
+          setTabPagination("invoices", invs.pagination);
+          setVendors(vends.vendors || []);
+          break;
+        }
+        case "payments": {
+          const [pays, invs, vends] = await Promise.all([
+            api.request(`/payments?${buildPaginationQuery(PAGE_SIZE, offset)}`),
+            api.request(`/invoices?${buildPaginationQuery(100, 0)}`),
+            api.request(`/vendors?${buildPaginationQuery(100, 0)}`),
+          ]);
+          setPayments(pays.payments || []);
+          setTabPagination("payments", pays.pagination);
+          setInvoices(invs.invoices || []);
+          setVendors(vends.vendors || []);
+          break;
+        }
+        case "agents": {
+          const ag = await api.request(`/agents/runs?${buildPaginationQuery(PAGE_SIZE, offset)}`);
+          setAgentRuns(ag.agent_runs || []);
+          setTabPagination("agents", ag.pagination);
+          break;
+        }
+        case "anomalies": {
+          const [fnds, docs] = await Promise.all([
+            api.request(`/findings?${buildPaginationQuery(100, 0)}`),
+            api.request(`/documents?${buildPaginationQuery(100, 0)}`),
+          ]);
+          setFindings(fnds.findings || []);
+          setDocuments(docs.documents || []);
+          break;
+        }
+        case "findings": {
+          const params = new URLSearchParams({
+            limit: String(PAGE_SIZE),
+            offset: String(offset),
+          });
+          if (findingsFilters.category) params.set("category", findingsFilters.category);
+          if (findingsFilters.severity) params.set("severity", findingsFilters.severity);
+          if (findingsFilters.status) params.set("status", findingsFilters.status);
+          if (findingsFilters.classification_type) {
+            params.set("classification_type", findingsFilters.classification_type);
+          }
+          const fnds = await api.request(`/findings?${params.toString()}`);
+          setFindings(fnds.findings || []);
+          setTabPagination("findings", fnds.pagination);
+          break;
+        }
+        case "review_queue": {
+          const rq = await api.request("/review-queue");
+          setReviewQueue(rq);
+          break;
+        }
+        case "reports": {
+          const rpts = await api.request(`/reports?${buildPaginationQuery(PAGE_SIZE, offset)}`);
+          setReports(rpts.reports || []);
+          setTabPagination("reports", rpts.pagination);
+          break;
+        }
+        case "models": {
+          const mdls = await api.request("/models");
+          setModels(mdls.models || []);
+          setExternalAiEnv(Boolean(mdls.enable_external_ai_env));
+          break;
+        }
+        case "settings": {
+          const [stgs, logsRes, usersRes] = await Promise.all([
+            api.request("/settings"),
+            api.request(`/audit-logs?${buildPaginationQuery(PAGE_SIZE, offset)}`).catch(() => ({
+              audit_logs: [],
+              pagination: undefined,
+            })),
+            user.role === "admin"
+              ? api.request("/users").catch(() => ({ users: [] }))
+              : Promise.resolve({ users: [] }),
+          ]);
+          setSettings(stgs.settings || []);
+          setAuditLogs(logsRes.audit_logs || []);
+          setTabPagination("settings", logsRes.pagination);
+          setUsers(usersRes.users || []);
+          break;
+        }
       }
     } catch (e: any) {
       setBanner({ type: "err", text: e.message });
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user, activeTab, offsets, findingsFilters]);
 
   useEffect(() => {
-    api.hydrate();
     api
       .request<UserSession>("/auth/me")
       .then((u) => {
+        api.setCsrf(u.csrf_token);
         setUser(u);
       })
       .catch(() => {
+        api.setCsrf(null);
         setUser(null);
       })
       .finally(() => setAuthChecked(true));
@@ -143,9 +266,9 @@ export default function HomePage() {
 
   useEffect(() => {
     if (user) {
-      refreshAll();
+      fetchTabData();
     }
-  }, [user, refreshAll]);
+  }, [user, fetchTabData]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,7 +279,8 @@ export default function HomePage() {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      api.setAuth(res.token, res.csrf_token);
+      api.setCsrf(res.csrf_token);
+      setRotateBannerDismissed(false);
       setUser(res.user);
       setPassword("");
     } catch (err: any) {
@@ -168,8 +292,17 @@ export default function HomePage() {
 
   const handleLogout = async () => {
     await api.request("/auth/logout", { method: "POST" }).catch(() => {});
-    api.setAuth(null, null);
+    api.setCsrf(null);
     setUser(null);
+  };
+
+  const handlePageChange = (tabKey: string, nextOffset: number) => {
+    setOffsets((prev) => ({ ...prev, [tabKey]: Math.max(0, nextOffset) }));
+  };
+
+  const handleFindingsFilterChange = (next: FindingsFilters) => {
+    setFindingsFilters(next);
+    setOffsets((prev) => ({ ...prev, findings: 0 }));
   };
 
   if (!authChecked) {
@@ -360,7 +493,7 @@ export default function HomePage() {
             </div>
           </div>
           <button
-            onClick={refreshAll}
+            onClick={fetchTabData}
             disabled={loading}
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800"
           >
@@ -370,6 +503,31 @@ export default function HomePage() {
         </header>
 
         <main className="flex-1 p-4 lg:p-6">
+          {user.must_rotate_password && !rotateBannerDismissed && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-200">
+              <div className="flex items-center gap-2">
+                <KeyRound className="h-4 w-4 text-amber-300 shrink-0" />
+                <span>
+                  This account still uses a bootstrap credential. Rotate your password before production use.
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setActiveTab("settings")}
+                  className="rounded border border-amber-400/50 bg-amber-500/20 px-2.5 py-1 font-medium text-amber-100 hover:bg-amber-500/30"
+                >
+                  Rotate Now
+                </button>
+                <button
+                  onClick={() => setRotateBannerDismissed(true)}
+                  className="opacity-70 hover:opacity-100"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
           {banner && (
             <div
               className={`mb-4 flex items-center justify-between rounded-lg border px-4 py-2.5 text-xs ${
@@ -390,20 +548,37 @@ export default function HomePage() {
             user={user}
             overview={overview}
             documents={documents}
+            documentsPagination={paginationMap.documents}
             vendors={vendors}
+            vendorsPagination={paginationMap.vendors}
             contracts={contracts}
+            contractsPagination={paginationMap.contracts}
             purchaseOrders={purchaseOrders}
+            purchaseOrdersPagination={paginationMap.purchase_orders}
             invoices={invoices}
+            invoicesPagination={paginationMap.invoices}
             payments={payments}
+            paymentsPagination={paginationMap.payments}
             findings={findings}
+            findingsPagination={paginationMap.findings}
+            findingsFilters={findingsFilters}
+            onFindingsFilterChange={handleFindingsFilterChange}
             reviewQueue={reviewQueue}
             agentRuns={agentRuns}
+            agentRunsPagination={paginationMap.agents}
             reports={reports}
+            reportsPagination={paginationMap.reports}
             models={models}
-            settings={settings}
-            auditLogs={auditLogs}
             externalAiEnv={externalAiEnv}
-            onRefresh={refreshAll}
+            settings={settings}
+            users={users}
+            auditLogs={auditLogs}
+            auditPagination={paginationMap.settings}
+            onPageChange={handlePageChange}
+            onRefresh={fetchTabData}
+            onPasswordRotated={() =>
+              setUser((u) => (u ? { ...u, must_rotate_password: false } : u))
+            }
             onOpenDocument={(docId) => setViewerDocId(docId)}
             onOpenInvoice={(invId) => setWorkbenchInvId(invId)}
             setBanner={setBanner}
@@ -415,8 +590,11 @@ export default function HomePage() {
         <DocumentViewerModal
           documentId={viewerDocId}
           canReview={user.role === "admin" || user.role === "reviewer"}
+          canWrite={
+            user.role === "admin" || user.role === "reviewer" || user.role === "analyst"
+          }
           onClose={() => setViewerDocId(null)}
-          onUpdated={refreshAll}
+          onUpdated={fetchTabData}
         />
       )}
 
@@ -425,7 +603,7 @@ export default function HomePage() {
           invoiceId={workbenchInvId}
           onClose={() => setWorkbenchInvId(null)}
           onOpenDocument={(docId) => setViewerDocId(docId)}
-          onReconciled={refreshAll}
+          onReconciled={fetchTabData}
         />
       )}
     </div>

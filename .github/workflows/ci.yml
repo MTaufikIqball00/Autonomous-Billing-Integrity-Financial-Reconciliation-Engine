@@ -1,0 +1,64 @@
+name: ABIFR CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust-backend:
+    name: Rust Backend (Clippy & Unit Tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run Comprehensive Unit Tests
+        run: cargo test --test comprehensive_tests
+
+  python-doc-intel:
+    name: Python Doc-Intel (Pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r doc-intel/requirements.txt pytest
+      - name: Run Doc-Intel Tests
+        run: pytest doc-intel/tests -v
+
+  frontend:
+    name: Next.js Frontend (Typecheck, Vitest & Build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Dependencies
+        run: npm ci
+      - name: Run Typecheck
+        run: npm run typecheck
+      - name: Run Vitest Suite
+        run: npm test
+      - name: Build Production Bundle
+        run: npm run build

@@ -11,6 +11,7 @@ Security & Architecture notes:
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import signal
@@ -44,9 +45,9 @@ class InternalDocIntelHandler(BaseHTTPRequestHandler):
 
     def _check_auth(self) -> bool:
         if not INTERNAL_TOKEN:
-            return True
+            return False
         provided = self.headers.get("X-Internal-Token", "")
-        return provided == INTERNAL_TOKEN
+        return hmac.compare_digest(provided, INTERNAL_TOKEN)
 
     def _read_json_body(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -86,6 +87,7 @@ class InternalDocIntelHandler(BaseHTTPRequestHandler):
                     extension=extension,
                     provider_override=body.get("provider"),
                     model_override=body.get("model"),
+                    max_pages=body.get("max_pages"),
                 )
                 self._send_json(200, result)
             except ValueError as exc:
@@ -115,6 +117,9 @@ class InternalDocIntelHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    if not INTERNAL_TOKEN:
+        sys.stderr.write("[doc-intel] WARNING: DOC_INTEL_INTERNAL_TOKEN is unset; all POST requests will fail closed (401).\n")
+        sys.stderr.flush()
     server = ThreadingHTTPServer((HOST, PORT), InternalDocIntelHandler)
 
     def handle_sig(_signum, _frame):

@@ -6,6 +6,7 @@ use crate::{
     security::{hash_password, RateLimiter},
     storage::DocumentStorage,
 };
+use rand::{distributions::Alphanumeric, Rng};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -16,7 +17,17 @@ pub struct AppState {
     pub redis: OptionalRedis,
     pub storage: DocumentStorage,
     pub doc_intel: DocIntelClient,
-    pub rate_limiter: RateLimiter,
+    pub api_rate_limiter: RateLimiter,
+    pub login_rate_limiter: RateLimiter,
+}
+
+fn generate_distinct_random_password() -> String {
+    let suffix: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(20)
+        .map(char::from)
+        .collect();
+    format!("Abifr!{}", suffix)
 }
 
 impl AppState {
@@ -58,8 +69,8 @@ impl AppState {
             let admin_hash = hash_password(&self.config.bootstrap_admin_password)?;
             sqlx::query(
                 r#"
-                INSERT INTO users (email, full_name, password_hash, role_name)
-                VALUES ($1, $2, $3, 'admin')
+                INSERT INTO users (email, full_name, password_hash, role_name, must_rotate_password)
+                VALUES ($1, $2, $3, 'admin', TRUE)
                 ON CONFLICT (email) DO NOTHING
                 "#,
             )
@@ -69,18 +80,36 @@ impl AppState {
             .execute(&self.db)
             .await?;
 
-            // Create role-separated local accounts for RBAC verification (reviewer, analyst, auditor)
-            let defaults = [
-                ("reviewer@abifr.local", "Senior Financial Reviewer", "reviewer"),
-                ("analyst@abifr.local", "Billing Operations Analyst", "analyst"),
-                ("auditor@abifr.local", "Internal Compliance Auditor", "auditor"),
+            // Each default role receives either its dedicated env password or a unique random secret
+            let defaults: [(&str, &str, &str, Option<&String>); 3] = [
+                (
+                    "reviewer@abifr.local",
+                    "Senior Financial Reviewer",
+                    "reviewer",
+                    self.config.bootstrap_reviewer_password.as_ref(),
+                ),
+                (
+                    "analyst@abifr.local",
+                    "Billing Operations Analyst",
+                    "analyst",
+                    self.config.bootstrap_analyst_password.as_ref(),
+                ),
+                (
+                    "auditor@abifr.local",
+                    "Internal Compliance Auditor",
+                    "auditor",
+                    self.config.bootstrap_auditor_password.as_ref(),
+                ),
             ];
-            for (email, name, role) in defaults {
-                let h = hash_password(&self.config.bootstrap_admin_password)?;
+            for (email, name, role, maybe_pw) in defaults {
+                let raw_pw = maybe_pw
+                    .cloned()
+                    .unwrap_or_else(generate_distinct_random_password);
+                let h = hash_password(&raw_pw)?;
                 let _ = sqlx::query(
                     r#"
-                    INSERT INTO users (email, full_name, password_hash, role_name)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO users (email, full_name, password_hash, role_name, must_rotate_password)
+                    VALUES ($1, $2, $3, $4, TRUE)
                     ON CONFLICT (email) DO NOTHING
                     "#,
                 )
@@ -93,7 +122,7 @@ impl AppState {
             }
             tracing::info!(
                 admin_email = %self.config.bootstrap_admin_email,
-                "Bootstrapped initial RBAC accounts (admin, reviewer, analyst, auditor)"
+                "Bootstrapped initial RBAC accounts with isolated credentials and rotation flags"
             );
         }
         Ok(())

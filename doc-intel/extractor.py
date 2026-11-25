@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import csv
 import io
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -120,11 +121,41 @@ def _run_ocr_on_pil(img: Image.Image, page_num: int) -> Tuple[str, List[Dict[str
     return "\n".join(raw_lines), lines_out, "rapidocr_ppocrv4"
 
 
-def extract_pdf(file_bytes: bytes) -> Dict[str, Any]:
+DEFAULT_MAX_PAGES = int(os.environ.get("DOC_INTEL_MAX_PAGES", "100"))
+
+
+def _page_image_coverage(page: pymupdf.Page) -> float:
+    page_area = float(abs(page.rect.width * page.rect.height))
+    if page_area <= 0.0:
+        return 0.0
+    covered = 0.0
+    try:
+        for info in page.get_image_info(xrefs=True):
+            bbox = info.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            x0 = max(float(page.rect.x0), float(bbox[0]))
+            y0 = max(float(page.rect.y0), float(bbox[1]))
+            x1 = min(float(page.rect.x1), float(bbox[2]))
+            y1 = min(float(page.rect.y1), float(bbox[3]))
+            if x1 > x0 and y1 > y0:
+                covered += (x1 - x0) * (y1 - y0)
+    except Exception:
+        return 0.0
+    return min(1.0, covered / page_area)
+
+
+def extract_pdf(file_bytes: bytes, max_pages: Optional[int] = None) -> Dict[str, Any]:
     try:
         doc = pymupdf.open(stream=file_bytes, filetype="pdf")
     except Exception as exc:
         raise ValueError(f"Corrupted or unreadable PDF: {exc}") from exc
+
+    page_limit = DEFAULT_MAX_PAGES if max_pages is None else max_pages
+    if len(doc) > page_limit:
+        total = len(doc)
+        doc.close()
+        raise ValueError(f"PDF exceeds maximum configured page limit ({total} > {page_limit}).")
 
     pages_meta: List[Dict[str, Any]] = []
     all_lines: List[Dict[str, Any]] = []
@@ -138,6 +169,8 @@ def extract_pdf(file_bytes: bytes) -> Dict[str, Any]:
         page_num = page_idx + 1
         rect = page.rect
         page_text = page.get_text("text").strip()
+        image_coverage = _page_image_coverage(page)
+        is_hybrid = len(page_text) >= 20 and image_coverage >= 0.35 and len(page_text) < 300
 
         page_lines: List[Dict[str, Any]] = []
         if len(page_text) >= 20:
@@ -171,7 +204,6 @@ def extract_pdf(file_bytes: bytes) -> Dict[str, Any]:
                             "method": "pymupdf_text",
                         }
                     )
-            # Extract tables using PyMuPDF's built-in table finder
             try:
                 tf = page.find_tables()
                 for t_idx, table in enumerate(tf.tables):
@@ -187,13 +219,33 @@ def extract_pdf(file_bytes: bytes) -> Dict[str, Any]:
                         )
             except Exception:
                 pass
-            full_text_parts.append(page_text)
+
+            combined_page_text = page_text
+            extraction_mode = "digital_text"
+            if is_hybrid:
+                pix = page.get_pixmap(dpi=200)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                ocr_text, ocr_lines, _ = _run_ocr_on_pil(img, page_num)
+                used_ocr = True
+                extraction_mode = "hybrid_text_and_ocr"
+                existing_norm = {re.sub(r"\s+", " ", pl["text"].lower()).strip() for pl in page_lines}
+                extra_text: List[str] = []
+                for ol in ocr_lines:
+                    norm_ol = re.sub(r"\s+", " ", ol["text"].lower()).strip()
+                    if norm_ol and norm_ol not in existing_norm and norm_ol not in page_text.lower():
+                        page_lines.append(ol)
+                        extra_text.append(ol["text"])
+                if extra_text:
+                    combined_page_text = f"{page_text}\n" + "\n".join(extra_text)
+
+            full_text_parts.append(combined_page_text)
             pages_meta.append(
                 {
                     "page_number": page_num,
                     "width": round(rect.width, 2),
                     "height": round(rect.height, 2),
-                    "extraction_mode": "digital_text",
+                    "extraction_mode": extraction_mode,
+                    "image_coverage": round(image_coverage, 3),
                     "line_count": len(page_lines),
                 }
             )
@@ -211,6 +263,7 @@ def extract_pdf(file_bytes: bytes) -> Dict[str, Any]:
                     "width": img.size[0],
                     "height": img.size[1],
                     "extraction_mode": ocr_method,
+                    "image_coverage": round(image_coverage, 3),
                     "line_count": len(ocr_lines),
                 }
             )
@@ -659,12 +712,13 @@ def process_document(
     extension: str,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    max_pages: Optional[int] = None,
 ) -> Dict[str, Any]:
     start = time.perf_counter()
     ext = extension.lower().lstrip(".")
 
     if ext == "pdf":
-        parsed = extract_pdf(file_bytes)
+        parsed = extract_pdf(file_bytes, max_pages=max_pages)
     elif ext in ("png", "jpg", "jpeg", "tif", "tiff"):
         parsed = extract_image(file_bytes)
     elif ext == "docx":

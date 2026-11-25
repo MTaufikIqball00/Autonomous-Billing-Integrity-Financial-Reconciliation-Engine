@@ -4,6 +4,7 @@ pub mod db;
 pub mod doc_intel_client;
 pub mod error;
 pub mod fixtures;
+pub mod materialization;
 pub mod normalization;
 pub mod reconciliation;
 pub mod reporting;

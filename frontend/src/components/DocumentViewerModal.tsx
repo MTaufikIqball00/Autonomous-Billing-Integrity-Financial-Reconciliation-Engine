@@ -1,13 +1,14 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { X, AlertTriangle, CheckCircle2, FileText, Edit3 } from "lucide-react";
+import { X, AlertTriangle, CheckCircle2, FileText, Edit3, Layers } from "lucide-react";
 import { api } from "@/lib/api";
 import { StatusBadge } from "./StatusBadge";
 
 interface Props {
   documentId: string;
   canReview: boolean;
+  canWrite?: boolean;
   onClose: () => void;
   onUpdated: () => void;
 }
@@ -26,7 +27,18 @@ const CATEGORIES = [
   "unknown",
 ];
 
-export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated }: Props) {
+const MATERIALIZABLE_CATEGORIES = new Set([
+  "invoice",
+  "credit_note",
+  "debit_note",
+  "contract",
+  "contract_amendment",
+  "purchase_order",
+  "payment_record",
+]);
+
+export function DocumentViewerModal({ documentId, canReview, canWrite, onClose, onUpdated }: Props) {
+  const allowWrite = canWrite ?? canReview;
   const [detail, setDetail] = useState<any>(null);
   const [pageData, setPageData] = useState<any>(null);
   const [pageNum, setPageNum] = useState(1);
@@ -44,6 +56,18 @@ export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated 
   const [correctionReason, setCorrectionReason] = useState("");
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  // Document-to-Entity Materialization Preview & Confirmation state
+  const [preview, setPreview] = useState<any>(null);
+  const [vendors, setVendors] = useState<any[]>([]);
+  const [matVendorId, setMatVendorId] = useState("");
+  const [matDocNumber, setMatDocNumber] = useState("");
+  const [matCurrency, setMatCurrency] = useState("USD");
+  const [matDate, setMatDate] = useState("");
+  const [matTotal, setMatTotal] = useState("");
+  const [matContractRef, setMatContractRef] = useState("");
+  const [matPoRef, setMatPoRef] = useState("");
+  const [materializing, setMaterializing] = useState(false);
+
   const loadDetail = async () => {
     setLoading(true);
     setError(null);
@@ -51,6 +75,7 @@ export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated 
       const res = await api.request(`/documents/${documentId}`);
       setDetail(res);
       setNewCategory(res.document.effective_category);
+
       const ext = (res.document.file_extension || "").toLowerCase();
       if (["pdf", "png", "jpg", "jpeg", "tif", "tiff"].includes(ext)) {
         try {
@@ -59,6 +84,28 @@ export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated 
         } catch {
           setPageData(null);
         }
+      }
+
+      if (MATERIALIZABLE_CATEGORIES.has(res.document.effective_category)) {
+        try {
+          const [prev, vResp] = await Promise.all([
+            api.request(`/documents/${documentId}/materialization-preview`),
+            api.request("/vendors?limit=100&offset=0").catch(() => ({ vendors: [] })),
+          ]);
+          setPreview(prev);
+          setVendors(vResp.vendors || []);
+          setMatVendorId(prev.matched_vendor_id || "");
+          setMatDocNumber(prev.draft?.document_number || "");
+          setMatCurrency(prev.draft?.currency || "USD");
+          setMatDate(prev.draft?.document_date || prev.draft?.effective_date || "");
+          setMatTotal(prev.draft?.total_amount != null ? String(prev.draft.total_amount) : "");
+          setMatContractRef(prev.draft?.contract_number || "");
+          setMatPoRef(prev.draft?.po_number || "");
+        } catch {
+          setPreview(null);
+        }
+      } else {
+        setPreview(null);
       }
     } catch (e: any) {
       setError(e.message);
@@ -109,6 +156,47 @@ export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated 
       onUpdated();
     } catch (e: any) {
       setError(e.message);
+    }
+  };
+
+  const handleMaterialize = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setMaterializing(true);
+    try {
+      const payload: Record<string, any> = {
+        auto_reconcile: true,
+      };
+      if (matVendorId) payload.vendor_id = matVendorId;
+      if (matDocNumber.trim()) payload.document_number = matDocNumber.trim();
+      if (matCurrency.trim()) payload.currency = matCurrency.trim().toUpperCase();
+      if (matDate.trim()) {
+        if (preview?.effective_category === "contract" || preview?.effective_category === "contract_amendment") {
+          payload.effective_date = matDate.trim();
+        } else {
+          payload.document_date = matDate.trim();
+        }
+      }
+      if (matTotal.trim()) payload.total_amount = matTotal.trim();
+      if (matContractRef.trim()) payload.contract_number = matContractRef.trim();
+      if (matPoRef.trim()) payload.po_number = matPoRef.trim();
+
+      const res = await api.request(`/documents/${documentId}/materialize`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      const recMsg = res.reconciliation_status
+        ? ` Auto-reconciliation: ${res.reconciliation_status}.`
+        : "";
+      setActionMessage(
+        `Materialized into ${res.entity_type} (${res.entity_id}).${recMsg}`
+      );
+      await loadDetail();
+      onUpdated();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setMaterializing(false);
     }
   };
 
@@ -245,7 +333,7 @@ export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated 
               )}
             </div>
 
-            {/* Right: Classification Override & Extracted Fields Table */}
+            {/* Right: Classification Override, Materialization Bridge & Extracted Fields */}
             <div className="flex flex-col gap-4 lg:col-span-6">
               {/* Classification Card */}
               <div className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -296,6 +384,128 @@ export function DocumentViewerModal({ documentId, canReview, onClose, onUpdated 
                   </div>
                 )}
               </div>
+
+              {/* Document-to-Entity Materialization Panel */}
+              {(detail?.document?.materialized_entity_id || preview) && (
+                <div className="rounded-lg border border-slate-800 bg-slate-950 p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Layers className="h-4 w-4 text-indigo-400" />
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                        Entity Materialization Bridge
+                      </span>
+                    </div>
+                    {detail?.document?.materialized_entity_id ? (
+                      <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 font-mono text-[11px] text-emerald-300">
+                        Materialized: {detail.document.materialized_entity_type} •{" "}
+                        {String(detail.document.materialized_entity_id).slice(0, 8)}…
+                      </span>
+                    ) : (
+                      <StatusBadge
+                        value={preview?.ready_for_auto_materialize ? "completed" : "requires_review"}
+                      />
+                    )}
+                  </div>
+
+                  {detail?.document?.materialized_entity_id ? (
+                    <p className="font-mono text-[11px] text-slate-400">
+                      Linked record ID: {detail.document.materialized_entity_id} (
+                      {detail.document.materialized_at
+                        ? new Date(detail.document.materialized_at).toLocaleString()
+                        : "linked"}
+                      )
+                    </p>
+                  ) : (
+                    preview && (
+                      <>
+                        {preview.missing_or_ambiguous_fields?.length > 0 && (
+                          <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
+                            <p className="font-semibold">Fields needing human confirmation:</p>
+                            <ul className="mt-1 list-disc pl-4 space-y-0.5 font-mono">
+                              {preview.missing_or_ambiguous_fields.map((msg: string, idx: number) => (
+                                <li key={idx}>{msg}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {allowWrite && (
+                          <form onSubmit={handleMaterialize} className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                            <select
+                              aria-label="Materialize vendor"
+                              required
+                              value={matVendorId}
+                              onChange={(e) => setMatVendorId(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-100"
+                            >
+                              <option value="">Select vendor...</option>
+                              {vendors.map((v) => (
+                                <option key={v.id} value={v.id}>
+                                  {v.vendor_code} — {v.legal_name}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              type="text"
+                              required
+                              placeholder="Document / Invoice #"
+                              value={matDocNumber}
+                              onChange={(e) => setMatDocNumber(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-slate-100"
+                            />
+                            <input
+                              type="date"
+                              required
+                              value={matDate}
+                              onChange={(e) => setMatDate(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 font-mono text-slate-100"
+                            />
+                            <input
+                              type="text"
+                              required
+                              maxLength={3}
+                              placeholder="Currency (USD)"
+                              value={matCurrency}
+                              onChange={(e) => setMatCurrency(e.target.value.toUpperCase())}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 font-mono uppercase text-slate-100"
+                            />
+                            <input
+                              type="text"
+                              placeholder="Total Amount"
+                              value={matTotal}
+                              onChange={(e) => setMatTotal(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 font-mono text-slate-100"
+                            />
+                            <input
+                              type="text"
+                              placeholder="Contract Ref (opt)"
+                              value={matContractRef}
+                              onChange={(e) => setMatContractRef(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 font-mono text-slate-100"
+                            />
+                            <input
+                              type="text"
+                              placeholder="PO Ref (opt)"
+                              value={matPoRef}
+                              onChange={(e) => setMatPoRef(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 font-mono text-slate-100"
+                            />
+                            <button
+                              type="submit"
+                              disabled={materializing}
+                              className="col-span-2 rounded bg-indigo-600 px-3 py-1.5 font-medium text-white hover:bg-indigo-500 disabled:opacity-50 sm:col-span-2"
+                            >
+                              {materializing
+                                ? "Materializing & Reconciling..."
+                                : "Confirm & Materialize Record"}
+                            </button>
+                          </form>
+                        )}
+                      </>
+                    )
+                  )}
+                </div>
+              )}
 
               {/* Extracted Fields with Provenance & Inline Human Correction */}
               <div className="flex-1 overflow-hidden rounded-lg border border-slate-800 bg-slate-950">

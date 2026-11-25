@@ -10,12 +10,12 @@ use abifr_backend::{
         RECONCILIATION_ENGINE_VERSION,
     },
     reporting::{
-        export_report_csv, export_report_pdf, export_report_xlsx, CurrencyVarianceBucket,
-        ReportFindingRow, StructuredAuditReport,
+        export_report_csv, export_report_pdf, export_report_xlsx, sanitize_csv_cell,
+        CurrencyVarianceBucket, ReportFindingRow, StructuredAuditReport,
     },
     security::{
         has_permission, hash_password, issue_jwt, sanitize_original_filename,
-        scan_prompt_injection, verify_jwt, verify_password,
+        scan_prompt_injection, verify_jwt, verify_password, RateLimiter,
     },
     storage::DocumentStorage,
 };
@@ -426,7 +426,7 @@ fn test_currency_mismatch_no_fabricated_fx_and_payment_reconciliation() {
         &versions,
         &[],
         &[],
-        &[p1.clone()],
+        std::slice::from_ref(&p1),
         &SeverityRules::default(),
     );
     assert_eq!(out_partial.payment_status, "partially_paid");
@@ -524,10 +524,12 @@ fn test_rbac_password_jwt_and_prompt_injection_guards() {
 
     let uid = Uuid::new_v4();
     let secret = "test_secret_key_must_be_at_least_32_characters_long_1234";
-    let (tok, csrf) = issue_jwt(uid, "auditor@abifr.local", "Auditor", "auditor", secret).unwrap();
+    let (tok, csrf, jti, _exp) =
+        issue_jwt(uid, "auditor@abifr.local", "Auditor", "auditor", secret).unwrap();
     let claims = verify_jwt(&tok, secret).unwrap();
     assert_eq!(claims.sub, uid);
     assert_eq!(claims.csrf, csrf);
+    assert_eq!(claims.jti, jti);
     assert!(verify_jwt(&tok, "wrong_secret_key_32_characters_long_000000").is_err());
 
     // Path traversal blocked
@@ -627,4 +629,149 @@ fn test_report_exports_csv_xlsx_pdf() {
     let pdf_bytes = export_report_pdf(&report);
     assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
     assert!(String::from_utf8_lossy(&pdf_bytes).contains("SEGREGATED"));
+}
+
+#[test]
+fn test_rate_limiter_eviction_and_bounded_capacity() {
+    let limiter = RateLimiter::with_max_entries(2, 1, 3);
+    assert!(limiter.check("k1").is_ok());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(limiter.check("k2").is_ok());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(limiter.check("k3").is_ok());
+    assert_eq!(limiter.len(), 3);
+
+    // Inserting k4 at max_entries=3 evicts the oldest entry (k1) without exceeding capacity
+    assert!(limiter.check("k4").is_ok());
+    assert!(limiter.len() <= 3);
+    assert!(limiter.check("k4").is_ok()); // 2nd request allowed
+    assert!(limiter.check("k4").is_err()); // 3rd request hits rate limit (max_requests=2)
+
+    // After TTL window expires, evict_expired clears stale buckets
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let evicted = limiter.evict_expired();
+    assert!(evicted >= 1);
+    assert!(limiter.is_empty());
+    assert!(limiter.check("k4").is_ok());
+}
+
+#[test]
+fn test_csv_formula_injection_sanitization() {
+    assert_eq!(sanitize_csv_cell("=SUM(A1:A2)"), "'=SUM(A1:A2)");
+    assert_eq!(sanitize_csv_cell("+cmd|' /C calc'!A0"), "'+cmd|' /C calc'!A0");
+    assert_eq!(sanitize_csv_cell("-2+3"), "'-2+3");
+    assert_eq!(sanitize_csv_cell("@SUM(1,1)"), "'@SUM(1,1)");
+    assert_eq!(sanitize_csv_cell("\t=1+1"), "'\t=1+1");
+    assert_eq!(sanitize_csv_cell("\r=2+2"), "'\r=2+2");
+    assert_eq!(sanitize_csv_cell("  =HYPERLINK(\"http://evil\")"), "'  =HYPERLINK(\"http://evil\")");
+    assert_eq!(sanitize_csv_cell("Safe Vendor Corp"), "Safe Vendor Corp");
+
+    let report = StructuredAuditReport {
+        report_type: "periodic".into(),
+        title: "CSV Injection Safety Check".into(),
+        scope: serde_json::json!({}),
+        date_from: None,
+        date_to: None,
+        documents_analyzed: 1,
+        invoices_analyzed: 1,
+        confirmed_discrepancies_count: 1,
+        potential_anomalies_count: 0,
+        unresolved_findings_count: 0,
+        currency_breakdown: vec![],
+        findings: vec![ReportFindingRow {
+            finding_id: Uuid::new_v4(),
+            category: "UNAUTHORIZED_CHARGE".into(),
+            classification_type: "confirmed_rule_violation".into(),
+            severity: "high".into(),
+            status: "open".into(),
+            reviewer_status: "pending".into(),
+            vendor_name: Some("=CMD|' /C calc'!A0".into()),
+            invoice_number: Some("+12345".into()),
+            contract_number: Some("@CTR-01".into()),
+            expected_value: Some(dec!(100.00)),
+            actual_value: Some(dec!(150.00)),
+            variance_amount: Some(dec!(-50.00)),
+            currency: Some("USD".into()),
+            rule_applied: "RULE_1".into(),
+            explanation: "=HYPERLINK(\"https://example.com\",\"click\")".into(),
+            detected_at: Utc::now(),
+            evidence_count: 1,
+        }],
+        rule_version: RECONCILIATION_ENGINE_VERSION.into(),
+        model_version: "local_deterministic".into(),
+        generated_at: Utc::now(),
+    };
+
+    let csv_bytes = export_report_csv(&report).unwrap();
+    let csv_str = String::from_utf8(csv_bytes).unwrap();
+    assert!(csv_str.contains("'=CMD"));
+    assert!(csv_str.contains("'+12345"));
+    assert!(csv_str.contains("'@CTR-01"));
+    assert!(csv_str.contains("'-50.00"));
+    assert!(csv_str.contains("'=HYPERLINK"));
+}
+
+#[test]
+fn test_pdf_export_multipage_and_unicode() {
+    let long_tail = "END_OF_LONG_EXPLANATION_BEYOND_220_CHARS_VERIFIED";
+    let findings: Vec<ReportFindingRow> = (1..=55)
+        .map(|idx| ReportFindingRow {
+            finding_id: Uuid::new_v4(),
+            category: "CONTRACT_PRICE_MISMATCH".into(),
+            classification_type: "confirmed_rule_violation".into(),
+            severity: "high".into(),
+            status: "open".into(),
+            reviewer_status: "pending".into(),
+            vendor_name: Some("Café Europe GmbH — Zürich".into()),
+            invoice_number: Some(format!("SYNTH-MULTI-{:02}", idx)),
+            contract_number: Some("CTR-EU-01".into()),
+            expected_value: Some(dec!(100.00)),
+            actual_value: Some(dec!(125.00)),
+            variance_amount: Some(dec!(25.00)),
+            currency: Some("EUR".into()),
+            rule_applied: "CONTRACT_UNIT_PRICE_CHECK".into(),
+            explanation: format!(
+                "Finding {} for Café — unit price €125.00 exceeds contracted £100.00 baseline; extra words repeated to guarantee multi-line wrapping past one hundred and five characters cleanly without losing content {} ({})",
+                idx,
+                " padding_segment".repeat(5),
+                long_tail
+            ),
+            detected_at: Utc::now(),
+            evidence_count: 1,
+        })
+        .collect();
+
+    let report = StructuredAuditReport {
+        report_type: "periodic".into(),
+        title: "Café € Audit — Multi-Page PDF".into(),
+        scope: serde_json::json!({}),
+        date_from: None,
+        date_to: None,
+        documents_analyzed: 55,
+        invoices_analyzed: 55,
+        confirmed_discrepancies_count: 55,
+        potential_anomalies_count: 0,
+        unresolved_findings_count: 0,
+        currency_breakdown: vec![CurrencyVarianceBucket {
+            currency: "EUR".into(),
+            confirmed_discrepancy_count: 55,
+            confirmed_variance_total: dec!(1375.00),
+            unresolved_or_potential_count: 0,
+            unresolved_or_potential_variance_total: dec!(0),
+        }],
+        findings,
+        rule_version: RECONCILIATION_ENGINE_VERSION.into(),
+        model_version: "local_deterministic".into(),
+        generated_at: Utc::now(),
+    };
+
+    let pdf_bytes = export_report_pdf(&report);
+    let pdf_str = String::from_utf8_lossy(&pdf_bytes);
+    assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
+    let page_count = pdf_str.matches("/Type /Page ").count();
+    assert!(page_count >= 3, "Expected >=3 PDF pages for 55 wrapped findings, got {}", page_count);
+    assert!(pdf_str.contains("SYNTH-MULTI-55"), "Finding #55 must not be truncated at 40");
+    assert!(pdf_str.contains(long_tail), "Long explanations past 105 chars must be wrapped, not truncated");
+    assert!(pdf_str.contains("Cafe"), "Accent characters should be safely transliterated");
+    assert!(pdf_str.contains("EUR 125.00") && pdf_str.contains("GBP 100.00"), "Currency symbols transliterated cleanly");
 }

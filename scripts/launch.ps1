@@ -90,11 +90,17 @@ if (-not (Test-Path $EnvPath)) {
     $jwtSec  = New-RandomHex 32
     $intTok  = New-RandomHex 24
     $admPass = "Abifr-" + (New-RandomHex 8) + "!"
+    $revPass = "Abifr-" + (New-RandomHex 8) + "!"
+    $anaPass = "Abifr-" + (New-RandomHex 8) + "!"
+    $audPass = "Abifr-" + (New-RandomHex 8) + "!"
     $tpl = Get-Content (Join-Path $Root ".env.example") -Raw
     $tpl = $tpl.Replace("CHANGE_ME_LOCAL_DEV_PASSWORD", $pgPass)
     $tpl = $tpl.Replace("CHANGE_ME_MIN_32_CHARS_RANDOM_SECRET_KEY", $jwtSec)
     $tpl = $tpl.Replace("CHANGE_ME_INTERNAL_WORKER_SHARED_TOKEN", $intTok)
     $tpl = $tpl.Replace("CHANGE_ME_INITIAL_ADMIN_PASSWORD", $admPass)
+    $tpl = $tpl.Replace("CHANGE_ME_INITIAL_REVIEWER_PASSWORD", $revPass)
+    $tpl = $tpl.Replace("CHANGE_ME_INITIAL_ANALYST_PASSWORD", $anaPass)
+    $tpl = $tpl.Replace("CHANGE_ME_INITIAL_AUDITOR_PASSWORD", $audPass)
     Set-Content -Path $EnvPath -Value $tpl -Encoding UTF8
     Write-Host "[launcher] Generated .env (check BOOTSTRAP_ADMIN_PASSWORD inside .env for initial sign-in)." -ForegroundColor Yellow
 }

@@ -28,6 +28,7 @@ pub struct AgentStepRecord {
     pub output_summary: serde_json::Value,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_agent_run(
     state: &AppState,
     workflow_run_id: Uuid,
@@ -494,6 +495,43 @@ pub async fn run_document_pipeline(
             }),
         )
         .await;
+
+    // Auto-materialize into typed financial entity when fully valid & unambiguous
+    if !needs_human_review
+        && matches!(
+            effective_cat.as_str(),
+            "invoice" | "credit_note" | "debit_note" | "purchase_order" | "payment_record" | "contract"
+        )
+    {
+        if let Ok(preview) = crate::materialization::preview_materialization(state, document_id).await {
+            if preview.ready_for_auto_materialize {
+                match crate::materialization::materialize_document(
+                    state,
+                    document_id,
+                    crate::materialization::MaterializeRequest::default(),
+                    actor_id,
+                )
+                .await
+                {
+                    Ok(mat) => {
+                        tracing::info!(
+                            document_id = %document_id,
+                            entity_type = %mat.entity_type,
+                            entity_id = %mat.entity_id,
+                            "Auto-materialized validated document into financial entity"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            document_id = %document_id,
+                            error = %e,
+                            "Auto-materialization skipped; document remains available for manual confirmation"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     Ok(workflow_run_id)
 }

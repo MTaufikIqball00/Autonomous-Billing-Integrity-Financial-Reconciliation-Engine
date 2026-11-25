@@ -7,40 +7,44 @@ export interface UserSession {
   full_name: string;
   role: "admin" | "reviewer" | "analyst" | "auditor" | string;
   csrf_token?: string;
+  must_rotate_password?: boolean;
+}
+
+export interface PaginationMeta {
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export function buildPaginationQuery(limit: number, offset: number): string {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  const safeOffset = Math.max(0, Math.floor(offset));
+  return `limit=${safeLimit}&offset=${safeOffset}`;
+}
+
+export function isPotentialAnomaly(f: { classification_type?: string }): boolean {
+  const ct = (f.classification_type || "").toLowerCase();
+  return (
+    ct === "potential_anomaly" ||
+    ct === "probable_duplicate" ||
+    ct === "unresolved_discrepancy"
+  );
 }
 
 class ApiClient {
-  private token: string | null = null;
+  // Never stores JWT in sessionStorage or localStorage; relies strictly on HttpOnly cookies
   private csrf: string | null = null;
 
-  setAuth(token: string | null, csrf?: string | null) {
-    this.token = token;
+  setCsrf(csrf?: string | null) {
     this.csrf = csrf ?? null;
-    if (typeof window !== "undefined") {
-      if (token) {
-        sessionStorage.setItem("abifr_token", token);
-        if (csrf) sessionStorage.setItem("abifr_csrf", csrf);
-      } else {
-        sessionStorage.removeItem("abifr_token");
-        sessionStorage.removeItem("abifr_csrf");
-      }
-    }
   }
 
-  hydrate() {
-    if (typeof window !== "undefined") {
-      this.token = sessionStorage.getItem("abifr_token");
-      this.csrf = sessionStorage.getItem("abifr_csrf");
-    }
-  }
-
-  getToken(): string | null {
-    return this.token;
+  getCsrf(): string | null {
+    return this.csrf;
   }
 
   private headers(extra?: Record<string, string>): Record<string, string> {
     const h: Record<string, string> = { ...(extra || {}) };
-    if (this.token) h["Authorization"] = `Bearer ${this.token}`;
     if (this.csrf) h["X-CSRF-Token"] = this.csrf;
     return h;
   }
@@ -82,7 +86,6 @@ class ApiClient {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE}/documents/upload`);
       xhr.withCredentials = true;
-      if (this.token) xhr.setRequestHeader("Authorization", `Bearer ${this.token}`);
       if (this.csrf) xhr.setRequestHeader("X-CSRF-Token", this.csrf);
 
       xhr.upload.onprogress = (ev) => {

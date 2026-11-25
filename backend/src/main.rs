@@ -11,7 +11,7 @@ use abifr_backend::{
 use anyhow::Result;
 use axum::http::{header, HeaderValue, Method};
 use sqlx::Row;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 use tokio::signal;
 use tower_http::{
     cors::CorsLayer,
@@ -50,29 +50,46 @@ async fn main() -> Result<()> {
         redis,
         storage,
         doc_intel,
-        rate_limiter: RateLimiter::new(120, 60),
+        api_rate_limiter: RateLimiter::new(120, 60),
+        login_rate_limiter: RateLimiter::new(10, 300),
     };
 
     state.ensure_bootstrap_users().await?;
 
-    // Background durable job queue worker (PostgreSQL FOR UPDATE SKIP LOCKED with bounded retries)
+    // Background durable job queue worker (PostgreSQL FOR UPDATE SKIP LOCKED + stale lock recovery)
     let worker_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         loop {
             interval.tick().await;
+
+            // Recover stale worker locks (> 5 minutes)
+            let _ = sqlx::query(
+                r#"
+                UPDATE processing_jobs
+                SET status = CASE WHEN attempts >= max_attempts THEN 'dead_letter' ELSE 'failed' END,
+                    last_error = COALESCE(last_error, 'Stale worker lock recovered after timeout'),
+                    locked_at = NULL,
+                    updated_at = NOW()
+                WHERE status = 'running' AND locked_at < NOW() - INTERVAL '5 minutes'
+                "#,
+            )
+            .execute(&worker_state.db)
+            .await;
+
             let claimed = sqlx::query(
                 r#"
                 UPDATE processing_jobs
                 SET status = 'running', attempts = attempts + 1, locked_at = NOW(), updated_at = NOW()
                 WHERE id = (
                     SELECT id FROM processing_jobs
-                    WHERE (status = 'queued' OR (status = 'failed' AND attempts < max_attempts))
+                    WHERE job_type = 'document_pipeline'
+                      AND (status = 'queued' OR (status = 'failed' AND attempts < max_attempts))
                     ORDER BY created_at ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
-                RETURNING id, job_type, target_id, attempts, max_attempts
+                RETURNING id, target_id, attempts, max_attempts
                 "#,
             )
             .fetch_optional(&worker_state.db)
@@ -80,28 +97,33 @@ async fn main() -> Result<()> {
 
             if let Ok(Some(row)) = claimed {
                 let job_id: Uuid = row.get("id");
-                let job_type: String = row.get("job_type");
                 let target_id: Uuid = row.get("target_id");
                 let attempts: i32 = row.get("attempts");
                 let max_attempts: i32 = row.get("max_attempts");
 
-                if job_type == "document_pipeline" {
-                    match run_document_pipeline(&worker_state, target_id, None).await {
-                        Ok(_) => {
-                            let _ = sqlx::query("UPDATE processing_jobs SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = $1")
-                                .bind(job_id)
-                                .execute(&worker_state.db)
-                                .await;
-                        }
-                        Err(e) => {
-                            let next_status = if attempts >= max_attempts { "dead_letter" } else { "failed" };
-                            let _ = sqlx::query("UPDATE processing_jobs SET status = $2, last_error = $3, updated_at = NOW() WHERE id = $1")
-                                .bind(job_id)
-                                .bind(next_status)
-                                .bind(e.to_string())
-                                .execute(&worker_state.db)
-                                .await;
-                        }
+                match run_document_pipeline(&worker_state, target_id, None).await {
+                    Ok(_) => {
+                        let _ = sqlx::query(
+                            "UPDATE processing_jobs SET status = 'completed', locked_at = NULL, completed_at = NOW(), updated_at = NOW() WHERE id = $1",
+                        )
+                        .bind(job_id)
+                        .execute(&worker_state.db)
+                        .await;
+                    }
+                    Err(e) => {
+                        let next_status = if attempts >= max_attempts {
+                            "dead_letter"
+                        } else {
+                            "failed"
+                        };
+                        let _ = sqlx::query(
+                            "UPDATE processing_jobs SET status = $2, locked_at = NULL, last_error = $3, updated_at = NOW() WHERE id = $1",
+                        )
+                        .bind(job_id)
+                        .bind(next_status)
+                        .bind(e.to_string())
+                        .execute(&worker_state.db)
+                        .await;
                     }
                 }
             }
@@ -112,7 +134,14 @@ async fn main() -> Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(origin)
         .allow_credentials(true)
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -129,12 +158,15 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!(address = %bind_addr, "ABIFR Rust backend listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = signal::ctrl_c().await;
-            tracing::info!("Shutdown signal received; closing Rust backend");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = signal::ctrl_c().await;
+        tracing::info!("Shutdown signal received; closing Rust backend");
+    })
+    .await?;
 
     Ok(())
 }

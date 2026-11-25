@@ -60,6 +60,7 @@ pub struct StructuredAuditReport {
     pub generated_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_audit_report(
     db: &PgPool,
     report_type: &str,
@@ -214,6 +215,24 @@ pub async fn build_audit_report(
     })
 }
 
+/// Neutralize spreadsheet CSV formula injection (CWE-1236)
+pub fn sanitize_csv_cell(value: &str) -> String {
+    let trimmed = value.trim_start_matches(' ');
+    let dangerous_raw = matches!(
+        value.chars().next(),
+        Some('=' | '+' | '-' | '@' | '\t' | '\r')
+    );
+    let dangerous_trimmed = matches!(
+        trimmed.chars().next(),
+        Some('=' | '+' | '-' | '@' | '\t' | '\r')
+    );
+    if dangerous_raw || dangerous_trimmed {
+        format!("'{}", value)
+    } else {
+        value.to_string()
+    }
+}
+
 pub fn export_report_csv(report: &StructuredAuditReport) -> AppResult<Vec<u8>> {
     let mut wtr = csv::Writer::from_writer(vec![]);
     wtr.write_record([
@@ -239,23 +258,23 @@ pub fn export_report_csv(report: &StructuredAuditReport) -> AppResult<Vec<u8>> {
 
     for f in &report.findings {
         wtr.write_record([
-            f.finding_id.to_string(),
-            f.category.clone(),
-            f.classification_type.clone(),
-            f.severity.clone(),
-            f.status.clone(),
-            f.reviewer_status.clone(),
-            f.vendor_name.clone().unwrap_or_default(),
-            f.invoice_number.clone().unwrap_or_default(),
-            f.contract_number.clone().unwrap_or_default(),
-            f.expected_value.map(|v| v.to_string()).unwrap_or_default(),
-            f.actual_value.map(|v| v.to_string()).unwrap_or_default(),
-            f.variance_amount.map(|v| v.to_string()).unwrap_or_default(),
-            f.currency.clone().unwrap_or_default(),
-            f.rule_applied.clone(),
-            f.evidence_count.to_string(),
-            f.detected_at.to_rfc3339(),
-            f.explanation.clone(),
+            sanitize_csv_cell(&f.finding_id.to_string()),
+            sanitize_csv_cell(&f.category),
+            sanitize_csv_cell(&f.classification_type),
+            sanitize_csv_cell(&f.severity),
+            sanitize_csv_cell(&f.status),
+            sanitize_csv_cell(&f.reviewer_status),
+            sanitize_csv_cell(f.vendor_name.as_deref().unwrap_or("")),
+            sanitize_csv_cell(f.invoice_number.as_deref().unwrap_or("")),
+            sanitize_csv_cell(f.contract_number.as_deref().unwrap_or("")),
+            sanitize_csv_cell(&f.expected_value.map(|v| v.to_string()).unwrap_or_default()),
+            sanitize_csv_cell(&f.actual_value.map(|v| v.to_string()).unwrap_or_default()),
+            sanitize_csv_cell(&f.variance_amount.map(|v| v.to_string()).unwrap_or_default()),
+            sanitize_csv_cell(f.currency.as_deref().unwrap_or("")),
+            sanitize_csv_cell(&f.rule_applied),
+            sanitize_csv_cell(&f.evidence_count.to_string()),
+            sanitize_csv_cell(&f.detected_at.to_rfc3339()),
+            sanitize_csv_cell(&f.explanation),
         ])
         .map_err(|e| AppError::Internal(format!("CSV write error: {}", e)))?;
     }
@@ -283,7 +302,7 @@ pub fn export_report_xlsx(report: &StructuredAuditReport) -> AppResult<Vec<u8>> 
     summary.write_string(4, 0, "Model Version").ok();
     summary.write_string(4, 1, &report.model_version).ok();
     summary.write_string(5, 0, "Generated At (UTC)").ok();
-    summary.write_string(5, 1, &report.generated_at.to_rfc3339()).ok();
+    summary.write_string(5, 1, report.generated_at.to_rfc3339()).ok();
     summary.write_string(6, 0, "Documents Analyzed").ok();
     summary.write_number(6, 1, report.documents_analyzed as f64).ok();
     summary.write_string(7, 0, "Confirmed Discrepancies").ok();
@@ -310,9 +329,9 @@ pub fn export_report_xlsx(report: &StructuredAuditReport) -> AppResult<Vec<u8>> 
         let r = 13 + idx as u32;
         summary.write_string(r, 0, &b.currency).ok();
         summary.write_number(r, 1, b.confirmed_discrepancy_count as f64).ok();
-        summary.write_string(r, 2, &b.confirmed_variance_total.to_string()).ok();
+        summary.write_string(r, 2, b.confirmed_variance_total.to_string()).ok();
         summary.write_number(r, 3, b.unresolved_or_potential_count as f64).ok();
-        summary.write_string(r, 4, &b.unresolved_or_potential_variance_total.to_string()).ok();
+        summary.write_string(r, 4, b.unresolved_or_potential_variance_total.to_string()).ok();
     }
 
     // Sheet 2: Detailed Findings
@@ -343,7 +362,7 @@ pub fn export_report_xlsx(report: &StructuredAuditReport) -> AppResult<Vec<u8>> 
     }
     for (i, f) in report.findings.iter().enumerate() {
         let r = (i + 1) as u32;
-        sheet.write_string(r, 0, &f.finding_id.to_string()).ok();
+        sheet.write_string(r, 0, f.finding_id.to_string()).ok();
         sheet.write_string(r, 1, &f.category).ok();
         sheet.write_string(r, 2, &f.classification_type).ok();
         sheet.write_string(r, 3, &f.severity).ok();
@@ -352,9 +371,9 @@ pub fn export_report_xlsx(report: &StructuredAuditReport) -> AppResult<Vec<u8>> 
         sheet.write_string(r, 6, f.vendor_name.as_deref().unwrap_or("")).ok();
         sheet.write_string(r, 7, f.invoice_number.as_deref().unwrap_or("")).ok();
         sheet.write_string(r, 8, f.contract_number.as_deref().unwrap_or("")).ok();
-        sheet.write_string(r, 9, &f.expected_value.map(|v| v.to_string()).unwrap_or_default()).ok();
-        sheet.write_string(r, 10, &f.actual_value.map(|v| v.to_string()).unwrap_or_default()).ok();
-        sheet.write_string(r, 11, &f.variance_amount.map(|v| v.to_string()).unwrap_or_default()).ok();
+        sheet.write_string(r, 9, f.expected_value.map(|v| v.to_string()).unwrap_or_default()).ok();
+        sheet.write_string(r, 10, f.actual_value.map(|v| v.to_string()).unwrap_or_default()).ok();
+        sheet.write_string(r, 11, f.variance_amount.map(|v| v.to_string()).unwrap_or_default()).ok();
         sheet.write_string(r, 12, f.currency.as_deref().unwrap_or("")).ok();
         sheet.write_string(r, 13, &f.rule_applied).ok();
         sheet.write_number(r, 14, f.evidence_count as f64).ok();
@@ -366,11 +385,11 @@ pub fn export_report_xlsx(report: &StructuredAuditReport) -> AppResult<Vec<u8>> 
         .map_err(|e| AppError::Internal(format!("XLSX generation failed: {}", e)))
 }
 
-/// Pure-Rust deterministic PDF 1.4 audit report generator (valid xref & catalog, Helvetica font)
+/// Pure-Rust deterministic multi-page PDF 1.4 audit report generator with full wrapping & safe transliteration
 pub fn export_report_pdf(report: &StructuredAuditReport) -> Vec<u8> {
     let mut lines: Vec<String> = vec![
         "AGENTIC BILLING INTEGRITY & FINANCIAL RECONCILIATION (ABIFR)".into(),
-        format!("AUDIT REPORT: {}", report.title),
+        format!("AUDIT REPORT: {}", transliterate_pdf_text(&report.title)),
         format!("Type: {} | Generated: {}", report.report_type, report.generated_at.format("%Y-%m-%d %H:%M:%S UTC")),
         format!("Rule Engine: {} | Model: {}", report.rule_version, report.model_version),
         format!(
@@ -401,8 +420,8 @@ pub fn export_report_pdf(report: &StructuredAuditReport) -> Vec<u8> {
     }
 
     lines.push("--------------------------------------------------------------------------------".into());
-    lines.push("FINDINGS:".into());
-    for (idx, f) in report.findings.iter().take(40).enumerate() {
+    lines.push(format!("FINDINGS (TOTAL: {}):", report.findings.len()));
+    for (idx, f) in report.findings.iter().enumerate() {
         let summary = format!(
             "{}. [{}][{}][{}] Inv:{} Var:{} {} Rule:{}",
             idx + 1,
@@ -414,17 +433,95 @@ pub fn export_report_pdf(report: &StructuredAuditReport) -> Vec<u8> {
             f.currency.as_deref().unwrap_or(""),
             f.rule_applied
         );
-        lines.push(summary);
-        let exp: String = f.explanation.chars().take(105).collect();
-        lines.push(format!("   {}", exp));
+        lines.extend(wrap_line(&transliterate_pdf_text(&summary), 90, ""));
+        lines.extend(wrap_line(&transliterate_pdf_text(&f.explanation), 87, "   "));
     }
 
     build_minimal_pdf_from_lines(&lines)
 }
 
+fn wrap_line(text: &str, max_width: usize, prefix: &str) -> Vec<String> {
+    let clean = text.replace(['\r', '\n'], " ");
+    let words: Vec<&str> = clean.split_whitespace().collect();
+    if words.is_empty() {
+        return vec![prefix.to_string()];
+    }
+    let mut result = Vec::new();
+    let mut current = String::from(prefix);
+    for w in words {
+        let extra = if current.len() > prefix.len() { 1 } else { 0 };
+        if current.len() + extra + w.len() > max_width + prefix.len() && current.len() > prefix.len() {
+            result.push(current);
+            current = String::from(prefix);
+        }
+        if current.len() > prefix.len() {
+            current.push(' ');
+        }
+        if w.len() > max_width {
+            let mut rem = w;
+            while rem.len() > max_width {
+                let (head, tail) = rem.split_at(max_width);
+                if current.len() > prefix.len() {
+                    result.push(current);
+                    current = String::from(prefix);
+                }
+                current.push_str(head);
+                result.push(current);
+                current = String::from(prefix);
+                rem = tail;
+            }
+            if !rem.is_empty() {
+                current.push_str(rem);
+            }
+        } else {
+            current.push_str(w);
+        }
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    result
+}
+
+pub fn transliterate_pdf_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '€' => out.push_str("EUR "),
+            '£' => out.push_str("GBP "),
+            '¥' => out.push_str("JPY "),
+            '—' | '–' => out.push('-'),
+            '“' | '”' => out.push('"'),
+            '‘' | '’' => out.push('\''),
+            '•' => out.push('*'),
+            '→' => out.push_str("->"),
+            '≥' => out.push_str(">="),
+            '≤' => out.push_str("<="),
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => out.push('a'),
+            'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => out.push('A'),
+            'é' | 'è' | 'ê' | 'ë' => out.push('e'),
+            'É' | 'È' | 'Ê' | 'Ë' => out.push('E'),
+            'í' | 'ì' | 'î' | 'ï' => out.push('i'),
+            'Í' | 'Ì' | 'Î' | 'Ï' => out.push('I'),
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => out.push('o'),
+            'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => out.push('O'),
+            'ú' | 'ù' | 'û' | 'ü' => out.push('u'),
+            'Ú' | 'Ù' | 'Û' | 'Ü' => out.push('U'),
+            'ñ' => out.push('n'),
+            'Ñ' => out.push('N'),
+            'ç' => out.push('c'),
+            'Ç' => out.push('C'),
+            ch if ch.is_ascii() && !ch.is_control() => out.push(ch),
+            ch if ch == '\n' || ch == '\r' || ch == '\t' => out.push(' '),
+            _ => out.push('?'),
+        }
+    }
+    out
+}
+
 fn pdf_escape(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii() && !c.is_control())
+    transliterate_pdf_text(s)
+        .chars()
         .map(|c| match c {
             '\\' => "\\\\".to_string(),
             '(' => "\\(".to_string(),

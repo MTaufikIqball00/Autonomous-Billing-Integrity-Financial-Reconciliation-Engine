@@ -17,6 +17,9 @@ pub struct AppConfig {
     pub cookie_secure: bool,
     pub bootstrap_admin_email: String,
     pub bootstrap_admin_password: String,
+    pub bootstrap_reviewer_password: Option<String>,
+    pub bootstrap_analyst_password: Option<String>,
+    pub bootstrap_auditor_password: Option<String>,
     pub ai_provider: String,
     pub enable_external_ai: bool,
     pub redact_before_external_ai: bool,
@@ -82,6 +85,16 @@ impl AppConfig {
         let bootstrap_admin_password = std::env::var("BOOTSTRAP_ADMIN_PASSWORD")
             .unwrap_or_else(|_| "AbifrDevAdmin!2026".into());
 
+        let opt_env = |name: &str| -> Option<String> {
+            std::env::var(name)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !s.starts_with("CHANGE_ME"))
+        };
+        let bootstrap_reviewer_password = opt_env("BOOTSTRAP_REVIEWER_PASSWORD");
+        let bootstrap_analyst_password = opt_env("BOOTSTRAP_ANALYST_PASSWORD");
+        let bootstrap_auditor_password = opt_env("BOOTSTRAP_AUDITOR_PASSWORD");
+
         let ai_provider = std::env::var("AI_PROVIDER")
             .unwrap_or_else(|_| "local_deterministic".into());
         let enable_external_ai = std::env::var("ENABLE_EXTERNAL_AI")
@@ -106,6 +119,9 @@ impl AppConfig {
             cookie_secure,
             bootstrap_admin_email,
             bootstrap_admin_password,
+            bootstrap_reviewer_password,
+            bootstrap_analyst_password,
+            bootstrap_auditor_password,
             ai_provider,
             enable_external_ai,
             redact_before_external_ai,

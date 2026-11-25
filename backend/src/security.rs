@@ -3,7 +3,7 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthClaims {
+    pub jti: Uuid,
     pub sub: Uuid,
     pub email: String,
     pub full_name: String,
@@ -54,13 +55,16 @@ pub fn issue_jwt(
     full_name: &str,
     role: &str,
     jwt_secret: &str,
-) -> AppResult<(String, String)> {
+) -> AppResult<(String, String, Uuid, DateTime<Utc>)> {
     let now = Utc::now();
-    let exp = (now + Duration::hours(12)).timestamp() as usize;
+    let expires_at = now + Duration::hours(12);
+    let exp = expires_at.timestamp() as usize;
     let iat = now.timestamp() as usize;
     let csrf = Uuid::new_v4().to_string();
+    let jti = Uuid::new_v4();
 
     let claims = AuthClaims {
+        jti,
         sub: user_id,
         email: email.to_string(),
         full_name: full_name.to_string(),
@@ -77,7 +81,7 @@ pub fn issue_jwt(
     )
     .map_err(|e| AppError::Internal(format!("Token issuance failed: {}", e)))?;
 
-    Ok((token, csrf))
+    Ok((token, csrf, jti, expires_at))
 }
 
 pub fn verify_jwt(token: &str, jwt_secret: &str) -> AppResult<AuthClaims> {
@@ -139,21 +143,45 @@ pub fn require_permission(claims: &AuthClaims, permission: &str) -> AppResult<()
     }
 }
 
-/// Simple token-bucket rate limiter per client key (in-memory)
+/// Bounded token-bucket rate limiter per client key with TTL eviction
 #[derive(Clone)]
 pub struct RateLimiter {
     buckets: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     max_requests: u32,
     window_secs: u64,
+    max_entries: usize,
 }
 
 impl RateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
+        Self::with_max_entries(max_requests, window_secs, 10_000)
+    }
+
+    pub fn with_max_entries(max_requests: u32, window_secs: u64, max_entries: usize) -> Self {
         Self {
             buckets: Arc::new(Mutex::new(HashMap::new())),
             max_requests,
             window_secs,
+            max_entries: max_entries.max(1),
         }
+    }
+
+    pub fn evict_expired(&self) -> usize {
+        if let Ok(mut map) = self.buckets.lock() {
+            let now = Instant::now();
+            let before = map.len();
+            map.retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < self.window_secs);
+            return before.saturating_sub(map.len());
+        }
+        0
+    }
+
+    pub fn len(&self) -> usize {
+        self.buckets.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn check(&self, key: &str) -> AppResult<()> {
@@ -162,6 +190,20 @@ impl RateLimiter {
             .lock()
             .map_err(|_| AppError::Internal("Rate limiter lock poisoned".into()))?;
         let now = Instant::now();
+
+        if map.len() >= self.max_entries {
+            map.retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < self.window_secs);
+            if map.len() >= self.max_entries && !map.contains_key(key) {
+                if let Some(oldest_key) = map
+                    .iter()
+                    .min_by_key(|(_, (_, ts))| *ts)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest_key);
+                }
+            }
+        }
+
         let entry = map.entry(key.to_string()).or_insert((0, now));
         if now.duration_since(entry.1).as_secs() >= self.window_secs {
             *entry = (1, now);
